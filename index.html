@@ -151,6 +151,31 @@ nav.tabbar button.on .tic{transform:scale(1.15);}
   font-weight:700; min-height:120px; margin-bottom:8px; box-shadow:var(--shadow);}
 .stem .tag{display:inline-block; font-size:11px; font-weight:800; color:var(--ink-2); background:var(--bg-2);
   border-radius:8px; padding:2px 8px; margin-bottom:10px;}
+/* ---------- 出典バッジ・論点（r2 §6） ---------- */
+.tag-row{display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:10px;}
+.src-badge{display:inline-flex; align-items:center; gap:4px; font-size:11px; font-weight:800;
+  border-radius:999px; padding:3px 10px; line-height:1.3; white-space:nowrap;}
+.src-badge.kakomon{background:var(--lavender-l); color:var(--lavender-d); border:1.5px solid var(--lavender);}
+.src-badge.original{background:var(--pink-l); color:var(--pink-d); border:1.5px solid var(--pink);}
+.src-badge .rev{background:var(--mint-l); color:var(--mint-d); border:1px solid var(--mint);
+  border-radius:8px; padding:0 5px; font-size:10px; margin-left:2px;}
+.point-line{font-size:13px; font-weight:800; color:var(--lavender-d); margin:4px 0 2px;}
+.rev-note{background:var(--gold-l); color:var(--gold-d); border:1.5px solid var(--gold);
+  border-radius:12px; padding:6px 10px; font-size:12px; font-weight:800; margin:6px 0;}
+/* ---------- mcq（本試験形式・択一） ---------- */
+.mcq-opts{display:flex; flex-direction:column; gap:8px; margin-top:12px;}
+.mcq-opt{display:flex; gap:10px; align-items:flex-start; text-align:left; width:100%;
+  background:var(--card); border:2px solid var(--line-2); border-radius:16px; padding:12px 14px;
+  min-height:var(--tap); font-size:15px; font-weight:700; box-shadow:var(--shadow); color:var(--ink);}
+.mcq-opt:active{transform:scale(.99);}
+.mcq-opt .no{flex:0 0 auto; width:26px; height:26px; border-radius:50%; background:var(--bg-2);
+  display:flex; align-items:center; justify-content:center; font-weight:900; font-size:14px; color:var(--ink-2);}
+.mcq-opt.correct{background:var(--mint-l); border-color:var(--mint); color:var(--mint-d);}
+.mcq-opt.correct .no{background:var(--mint-d); color:#fff;}
+.mcq-opt.wrong{background:var(--coral-l); border-color:var(--coral); color:var(--coral-d);}
+.mcq-opt.wrong .no{background:var(--coral-d); color:#fff;}
+.mcq-opt.dim{opacity:.72;}
+.mcq-opt .oexp{display:block; font-size:12px; font-weight:600; color:var(--ink-2); margin-top:4px;}
 .ox-row{display:flex; gap:10px; margin-top:12px;}
 .ox-row .btn{font-size:18px;}
 .ox-o{background:var(--lavender-l); color:var(--lavender-d); border:2px solid var(--lavender); box-shadow:0 3px 0 var(--lavender);}
@@ -370,10 +395,14 @@ const Store=(function(){
     xp:0, xpToday:0, todayDate:todayISO(), streak:0, lastActiveDate:null,
     dailyGoalXP:50, mode:'gyosei', diagDone:{gyosei:false,takken:false}, xpHistory:{}
   };}
-  function defSettings(){ return { sound:true }; }
+  function defSettings(){ return { sound:true, kindFilter:'all' }; }
   let _srs=read('srs',{});
   let _profile=Object.assign(defProfile(), read('profile',{}));
   let _settings=Object.assign(defSettings(), read('settings',{}));
+  // shikaku.v1.recent — r2で追加した唯一の新規キー（出題リングバッファ、最大60件）
+  // 進捗ではなく再出題抑制用の一時状態。既存キー(srs/profile/settings)の構造は不変更。
+  let _recent=read('recent',[]);
+  if(!Array.isArray(_recent)) _recent=[];
   return {
     srs(){ return _srs; },
     saveSrs(){ write('srs',_srs); },
@@ -381,6 +410,8 @@ const Store=(function(){
     saveProfile(){ write('profile',_profile); },
     settings(){ return _settings; },
     saveSettings(){ write('settings',_settings); },
+    recent(){ return _recent; },
+    saveRecent(){ write('recent',_recent); },
     // 日付ロールオーバー：日が変わったらxpTodayリセット・ストリーク維持/切れ判定
     rollDate(){
       const t=todayISO(), p=_profile;
@@ -411,7 +442,7 @@ const Store=(function(){
    App.Data — 問題データ（fetch）。3本ロード、失敗は握りつぶさず記録。
    =========================================================================== */
 const Data=(function(){
-  let items=[], byId={}, byUnit={}, loadErrors=[];
+  let items=[], byId={}, byUnit={}, mcqItems=[], loadErrors=[];
   function index(){
     byId={}; byUnit={};
     items.forEach(it=>{
@@ -419,6 +450,9 @@ const Data=(function(){
       byId[it.id]=it;
       (byUnit[it.unit] = byUnit[it.unit]||[]).push(it);
     });
+    // mcqは byId にだけ登録（SRS.grade/Data.get 用）。all()/ofUnit()/unitCrown には混ぜず
+    // 既存の単元crown・due計算・診断母集団を一切変えない（進捗保護の最優先方針）。
+    mcqItems.forEach(it=>{ if(it && it.id) byId[it.id]=it; });
   }
   async function loadOne(file){
     try{
@@ -433,16 +467,20 @@ const Data=(function(){
     }
   }
   async function load(){
-    loadErrors=[]; items=[];
+    loadErrors=[]; items=[]; mcqItems=[];
     const files=['minpo.json','gyosei.json','takken.json'];
     const res=await Promise.all(files.map(loadOne));
     res.forEach(arr=>{ if(Array.isArray(arr)) items=items.concat(arr); });
+    // mcqは別ファイル・別配列（root {version:2, items:[...]}）。欠落しても他をブロックしない。
+    const mcqArr=await loadOne('mcq.json');
+    mcqItems=Array.isArray(mcqArr)?mcqArr.filter(i=>i&&i.type==='mcq'):[];
     index();
-    return { count:items.length, errors:loadErrors.slice() };
+    return { count:items.length, mcqCount:mcqItems.length, errors:loadErrors.slice() };
   }
   return {
     load,
     all(){ return items; },
+    allMcq(){ return mcqItems; },
     errors(){ return loadErrors.slice(); },
     get(id){ return byId[id]; },
     ofUnit(id){ return byUnit[id]||[]; },
@@ -451,6 +489,11 @@ const Data=(function(){
     choicesForMode(mode){
       const ids=new Set(unitsForMode(mode).map(u=>u.id));
       return items.filter(i=>i.type==='choice' && ids.has(i.unit));
+    },
+    // モードに属する mcq（別配列から）
+    mcqForMode(mode){
+      const ids=new Set(unitsForMode(mode).map(u=>u.id));
+      return mcqItems.filter(i=>ids.has(i.unit));
     },
     forMode(mode, type){
       const ids=new Set(unitsForMode(mode).map(u=>u.id));
@@ -609,6 +652,146 @@ function modeOfUnit(unitId){
 }
 // ===== SRS-STUB END =====
 
+// 出題ロジック共通の配列シャッフル（UI内shuffleとは別スコープ・非破壊）
+function shuffleArr(a){ a=a.slice(); for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
+
+/* ===========================================================================
+   App.Picker — 出題キュー構築の集約（r2 §5）。SRSは不変更、ここは選抜のみ。
+     - due復習を先頭 → 未出題(seen==0)を重み付けサンプリングで補充
+     - クールダウン(直近2日以内にseenした非due項目を除外)
+     - recentリングバッファ(shikaku.v1.recent, 最大60)でセッション内/連続レッスンの重複防止
+     - kindフィルタ(all|kakomon|original) を通常出題にのみ適用（due/誤答復習は保護のため非適用）
+   build()は純粋（recentを書き換えない）。実際に開始した時だけ record() で記録する。
+   =========================================================================== */
+const Picker=(function(){
+  const MAX_RECENT=60;         // リングバッファ上限
+  const SESSION_NOREPEAT=30;   // 直近この件数は再出題しない
+  const COOLDOWN_DAYS=2;       // 直近2日以内にseenした非due項目は除外
+  // 試験重要度ウェイト（subject単位）
+  const WEIGHTS={
+    takken:{ takkengyoho:1.5, kenri:1.2, minpo:1.2, seigen:1.0, zeisonota:0.8 },
+    gyosei:{ gyoseiho:1.5, minpo:1.3, kenpo:0.9, shoho:0.6, kisochishiki:0.9 }
+  };
+  function arr(){ const a=Store.recent(); return Array.isArray(a)?a:[]; }
+  // 直近SESSION_NOREPEAT件に含まれるか（連続レッスンの重複防止）
+  function inNoRepeat(id){
+    const a=arr(), start=Math.max(0,a.length-SESSION_NOREPEAT);
+    for(let i=a.length-1;i>=start;i--) if(a[i] && a[i].id===id) return true;
+    return false;
+  }
+  // 直近COOLDOWN_DAYS日以内に出題済みか（最新の記録日で判定）
+  function cooledDown(id, today){
+    const a=arr();
+    for(let i=a.length-1;i>=0;i--){
+      if(a[i] && a[i].id===id){
+        const g=daysBetween(a[i].d, today);
+        return (g>=0 && g<COOLDOWN_DAYS); // 今日/昨日に出したものは除外
+      }
+    }
+    return false;
+  }
+  // 実際に開始したキューだけを記録（重複除去しつつpush、上限でシフト）
+  function record(ids, today){
+    today=today||todayISO();
+    const a=arr();
+    (ids||[]).forEach(id=>{ if(id) a.push({id:id, d:today}); });
+    while(a.length>MAX_RECENT) a.shift();
+    Store.saveRecent();
+  }
+  function kindFilter(){ const f=Store.settings().kindFilter; return f||'all'; }
+  // 単元の弱さ（crown低い×due溜まり多いほど大）
+  function unitWeak(unitId, today){
+    let crown=0, due=0;
+    try{ crown=SRS.unitCrown(unitId); due=SRS.dueCountUnit(unitId,today); }catch(e){}
+    return (5-crown) + Math.min(6,due)*0.5;
+  }
+  function weightOf(it, mode, today){
+    const u=UNIT_BY_ID[it.unit];
+    const base=(WEIGHTS[mode]||{})[u?u.subject:'']||1.0;
+    return Math.max(0.05, base*(1 + unitWeak(it.unit,today)*0.4));
+  }
+  // 重み付き非復元サンプリング
+  function weightedSample(cands, n, mode, today){
+    const pool=cands.slice(), out=[];
+    while(out.length<n && pool.length){
+      let total=0; const ws=pool.map(it=>{ const w=weightOf(it,mode,today); total+=w; return w; });
+      let r=Math.random()*total, k=0;
+      while(k<pool.length-1 && (r-=ws[k])>0) k++;
+      out.push(pool.splice(k,1)[0]);
+    }
+    return out;
+  }
+  // kindフィルタ適用（メタ欠落=kind未定義は、絞り込み時に空になったら無視して全件へフォールバック）
+  function applyKind(cands, filter){
+    if(!filter || filter==='all') return cands;
+    const f=cands.filter(it=>it.kind===filter);
+    return f.length ? f : cands; // フォールバック: 対象0なら絞らない（データ班未完了でもアプリ成立）
+  }
+  /* build(mode, opts)
+     opts: { count=10, unit, includeDue=true, weighted=true, seenOk=false,
+             applyKindFilter=true, applyCooldown=true }
+     返り値: { queue, dueCount, newCount, realDue, kijutsu } */
+  function build(mode, opts){
+    opts=opts||{};
+    const today=todayISO();
+    const count=opts.count||10;
+    const s=Store.srs();
+    const filter = (opts.applyKindFilter===false) ? 'all' : kindFilter();
+    const unitScope = opts.unit ? new Set([opts.unit]) : new Set(unitsForMode(mode).map(u=>u.id));
+    const inScope = it => it && it.type==='choice' && unitScope.has(it.unit);
+
+    const queue=[]; const dueSet=new Set();
+    // 1) due復習（kindフィルタ非適用＝意図的再出題の保護。ただし連続重複はNoRepeatで避ける）
+    if(opts.includeDue!==false){
+      let due=SRS.dueItems(mode,today).filter(id=>{ const it=Data.get(id); return it && unitScope.has(it.unit); });
+      due=due.filter(id=>!inNoRepeat(id));
+      for(const id of due){ if(queue.length>=count) break; if(!dueSet.has(id)){ queue.push(id); dueSet.add(id); } }
+    }
+    // 2) 未出題(seen==0)を重み付けサンプリングで補充
+    if(queue.length<count){
+      let cands=Data.all().filter(it=>{
+        if(!inScope(it) || dueSet.has(it.id)) return false;
+        const r=s[it.id];
+        if(!opts.seenOk && r && r.seen>0) return false;    // 通常は未出題のみ
+        if(inNoRepeat(it.id)) return false;
+        if(opts.applyCooldown!==false && cooledDown(it.id, today)) return false;
+        return true;
+      });
+      cands=applyKind(cands, filter);
+      const need=count-queue.length;
+      const picked = (opts.weighted===false) ? shuffleArr(cands).slice(0,need) : weightedSample(cands, need, mode, today);
+      picked.forEach(it=>queue.push(it.id));
+    }
+    // 3) まだ足りなければ（単元学習等で未出題が枯渇）seen済み非due項目でフォールバック補充
+    if(queue.length<count){
+      let extra=Data.all().filter(it=> inScope(it) && queue.indexOf(it.id)<0 && !inNoRepeat(it.id));
+      extra=applyKind(extra, filter);
+      extra=shuffleArr(extra);
+      for(const it of extra){ if(queue.length>=count) break; queue.push(it.id); }
+    }
+    const finalQ=queue.slice(0,count);
+    const realDue=(opts.includeDue!==false)
+      ? SRS.dueItems(mode,today).filter(id=>{ const r=s[id]; return r && r.seen>0; }).length : 0;
+    const kijutsu=(mode==='gyosei') ? Math.min(3, Data.forMode('gyosei','kijutsu').length) : 0;
+    return { queue:finalQ, dueCount:dueSet.size, newCount:finalQ.length-dueSet.size, realDue, kijutsu };
+  }
+  // mcq用の簡易セット構築（5問・kindフィルタ適用・recentは開始時にrecordで記録）
+  function buildMcq(mode, count){
+    count=count||5;
+    let cands=Data.mcqForMode(mode).filter(it=>!inNoRepeat(it.id));
+    cands=applyKind(cands, kindFilter());
+    if(cands.length<count){ // 足りなければNoRepeat無視で補う
+      const more=Data.mcqForMode(mode);
+      cands=applyKind(more, kindFilter());
+    }
+    return shuffleArr(cands).slice(0,count).map(it=>it.id);
+  }
+  return { build, buildMcq, record,
+           // テスト用の内部フック
+           _inNoRepeat:inNoRepeat, _cooledDown:cooledDown, _weightOf:weightOf, _weightedSample:weightedSample,
+           _MAX_RECENT:MAX_RECENT, _SESSION_NOREPEAT:SESSION_NOREPEAT, _COOLDOWN_DAYS:COOLDOWN_DAYS, _WEIGHTS:WEIGHTS };
+})();
+
 /* ===========================================================================
    App.Sim — 得点シミュレータ（Issue 5）。骨格のプレースホルダのみ。
    =========================================================================== */
@@ -704,6 +887,7 @@ function catLine(k){ const a=CAT_LINES[k]||CAT_LINES.hello; return a[Math.floor(
 const UI=(function(){
   let curTab='today';
   let lesson=null; // {queue:[itemId], idx, answers:[], correct, isDiag}
+  let mcq=null;    // {queue:[itemId], idx, correct}  本試験形式（択一）
   let cardState={ mode:'kijutsu', idx:0, revealed:false };
 
   function $(s){ return document.querySelector(s); }
@@ -842,31 +1026,10 @@ const UI=(function(){
     if(backlog>0) sub='<div class="muted" style="font-size:12px;margin-bottom:8px">🔁 復習の期限が来た肢があと '+backlog+'肢。少しずつでOK。</div>';
     return '<div class="muted" style="margin-bottom:'+(sub?'2px':'8px')+'">'+txt+'</div>'+sub;
   }
-  // §5 今日のノルマ配合：due全部→弱点単元(crown低い順)の新規肢で10肢単位に補充
+  // §5 今日のノルマ配合：App.Pickerに集約（due先頭→弱点重み付けで未出題を補充・10肢）
+  //   build()は純粋（recentを書き換えない）。実際に開始した時のみ startLesson→Picker.record。
   function buildTodayQueue(m){
-    const t=todayISO();
-    const due=SRS.dueItems(m,t);
-    const dueSet=new Set(due);
-    // 弱点補充：crown低い順の unit から未着手(seen==0/未登録)choiceを集める
-    const s=Store.srs();
-    const units=unitsForMode(m).slice().sort((a,b)=>SRS.unitCrown(a.id)-SRS.unitCrown(b.id));
-    const fill=[];
-    const target=Math.max(10, Math.ceil(due.length/10)*10);
-    for(const u of units){
-      for(const it of Data.ofUnitType(u.id,'choice')){
-        if(dueSet.has(it.id)) continue;
-        const r=s[it.id];
-        if(!r || r.seen===0){ fill.push(it.id); }
-        if(due.length+fill.length>=target) break;
-      }
-      if(due.length+fill.length>=target) break;
-    }
-    let queue=due.concat(fill);
-    // gyoseiは kijutsu 枚数を注記（レッスンはchoiceのみ、記述はカードタブ）
-    const kijutsu = m==='gyosei' ? Math.min(3, Data.forMode('gyosei','kijutsu').length) : 0;
-    // 真の復習（過去に解いた=seen>0）の未消化数。未着手(seen==0)は「復習待ち」に含めない。
-    const realDue = due.filter(id=>{ const r=s[id]; return r && r.seen>0; }).length;
-    return { queue, dueCount:due.length, newCount:fill.length, kijutsu, realDue };
+    return Picker.build(m, { count:10 });
   }
 
   /* ---------------- パスタブ ---------------- */
@@ -905,16 +1068,28 @@ const UI=(function(){
   function openUnit(unitId){
     const items=Data.ofUnitType(unitId,'choice');
     if(!items.length){ toast('この単元はまだ問題がありません'); return; }
-    // ランダム10肢で開始（レッスンホームの開始オプションでも選べる）
-    const ids=shuffle(items.map(i=>i.id)).slice(0,10);
+    // 単元学習：Pickerでdue先頭＋未出題優先＋kindフィルタ（不足時seenフォールバック）
+    const ids=Picker.build(mode(), { count:10, unit:unitId, seenOk:true }).queue;
+    if(!ids.length){ toast('この単元はまだ問題がありません'); return; }
     startLesson(ids, {label:UNIT_BY_ID[unitId].label, unit:unitId});
   }
 
   /* ---------------- レッスンホーム（開始オプション） ---------------- */
   function renderLessonHome(){
     const m=mode();
+    const kf=Store.settings().kindFilter||'all';
+    const mcqN=Data.mcqForMode(m).length;
+    const optN = m==='takken' ? 4 : 5;
     $('#scr-lesson').innerHTML=
       '<h2 class="title">レッスン</h2>'+
+      '<div class="card"><h3>出題タイプ</h3>'+
+        '<div class="seg" id="kindSeg">'+
+        '<button data-kf="all" class="'+(kf==='all'?'on':'')+'">すべて</button>'+
+        '<button data-kf="kakomon" class="'+(kf==='kakomon'?'on':'')+'">過去問ベース</button>'+
+        '<button data-kf="original" class="'+(kf==='original'?'on':'')+'">オリジナル</button>'+
+        '</div>'+
+        '<div class="muted" style="font-size:12px">レッスン・ランダム・単元学習に反映（復習と誤答モードは保護のため常に全対象）。</div>'+
+      '</div>'+
       '<div class="card"><h3>開始オプション</h3>'+
         '<div class="pill-opts">'+
         '<button class="btn" data-opt="weak">🎯 弱点だけ（王冠低い単元）</button>'+
@@ -923,24 +1098,116 @@ const UI=(function(){
         '<button class="btn gray" data-opt="due">⏰ 期限が来た復習</button>'+
         '</div>'+
       '</div>'+
+      '<div class="card"><h3>本試験形式（択一）</h3>'+
+        '<div class="muted" style="margin-bottom:8px">'+EXAM[m].label+'は'+optN+'肢択一。1セット5問、選ぶと全肢の解説が出ます。</div>'+
+        (mcqN>0
+          ? '<button class="btn blue" id="startMcq">📝 本試験形式を始める（5問）</button>'
+          : '<div class="empty">択一問題（data/mcq.json）がまだありません。</div>')+
+      '</div>'+
       '<div class="card"><div class="muted">1レッスン＝10肢。○×で答えると即座に正誤＋一行解説が出ます。</div></div>';
     document.querySelectorAll('#scr-lesson [data-opt]').forEach(b=>{
       b.onclick=()=>startOption(b.dataset.opt);
     });
+    document.querySelectorAll('#kindSeg button').forEach(b=>{
+      b.onclick=()=>{ Store.settings().kindFilter=b.dataset.kf; Store.saveSettings(); renderLessonHome(); };
+    });
+    const mq=$('#startMcq'); if(mq) mq.onclick=()=>startMcq(m);
+  }
+
+  /* ---------------- 本試験形式（択一 / mcq）フロー ---------------- */
+  function startMcq(m){
+    Sound.resume();
+    const ids=Picker.buildMcq(m, 5);
+    if(!ids.length){ toast('択一問題がありません'); return; }
+    Picker.record(ids, todayISO());
+    mcq={ queue:ids, idx:0, correct:0 };
+    go('lesson');
+    renderMcqQuestion();
+  }
+  function renderMcqQuestion(){
+    const scr=$('#scr-lesson');
+    if(mcq.idx>=mcq.queue.length){ return renderMcqComplete(); }
+    const it=Data.get(mcq.queue[mcq.idx]);
+    if(!it || !Array.isArray(it.options)){ mcq.idx++; return renderMcqQuestion(); }
+    const total=mcq.queue.length, pct=Math.round(100*mcq.idx/total);
+    mcq.locked=false;
+    let opts='';
+    it.options.forEach((o,i)=>{
+      opts+='<button class="mcq-opt" data-i="'+i+'"><span class="no">'+(i+1)+'</span><span>'+esc(o)+'</span></button>';
+    });
+    scr.innerHTML=
+      '<div class="lesson-top"><button class="x" id="mcqX">✕</button>'+
+        '<div class="progbar"><i style="width:'+pct+'%"></i></div>'+
+        '<div class="muted">'+(mcq.idx+1)+'/'+total+'</div></div>'+
+      '<div class="muted" style="margin-bottom:6px">本試験形式（択一）</div>'+
+      '<div class="stem"><div class="tag-row"><span class="tag">'+(UNIT_BY_ID[it.unit]?UNIT_BY_ID[it.unit].label:it.unit)+'</span>'+sourceBadge(it)+'</div>'+esc(it.stem)+'</div>'+
+      '<div class="mcq-opts" id="mcqOpts">'+opts+'</div>';
+    $('#mcqX').onclick=()=>{ if(confirm('中断しますか？')) go('lesson'); };
+    scr.querySelectorAll('.mcq-opt').forEach(b=>{
+      b.onclick=()=>answerMcq(Number(b.dataset.i), it);
+    });
+  }
+  function answerMcq(sel, it){
+    if(mcq.locked) return; mcq.locked=true;
+    const correct = (sel===it.answerIndex);
+    if(correct) mcq.correct++;
+    // SRS接続（mcq=1項目1箱）。XP: 正解+4/不正解+1
+    SRS.grade(it.id, correct, todayISO());
+    addXP(correct?4:1);
+    if(correct) Sound.correct(); else Sound.wrong();
+    // 全肢の解説を表示（正解肢=緑、選んだ誤肢=赤）
+    const wrap=$('#mcqOpts');
+    wrap.querySelectorAll('.mcq-opt').forEach((el,i)=>{
+      el.onclick=null;
+      const ex=(it.optExplanations&&it.optExplanations[i]!=null)?'<span class="oexp">'+esc(it.optExplanations[i])+'</span>':'';
+      el.insertAdjacentHTML('beforeend', ex);
+      if(i===it.answerIndex) el.classList.add('correct');
+      else if(i===sel) el.classList.add('wrong');
+      else el.classList.add('dim');
+    });
+    const scr=$('#scr-lesson');
+    scr.insertAdjacentHTML('beforeend',
+      (it.point?'<div class="point-line" style="margin-top:12px">論点: '+esc(it.point)+'</div>':'')+
+      '<div class="card" style="margin-top:'+(it.point?'4px':'12px')+'"><div class="head" style="font-weight:900;color:'+(correct?'var(--mint-d)':'var(--coral-d)')+'">'+(correct?'✅ 正解！':'❌ 不正解')+'</div>'+
+        (it.explanation?'<div class="exp" style="margin-top:6px">'+esc(it.explanation)+'</div>':'')+
+        revNote(it)+
+        '<button class="btn'+(correct?' blue':' red')+'" id="mcqNext" style="margin-top:10px">つづける</button></div>');
+    $('#mcqNext').onclick=()=>{ mcq.idx++; renderMcqQuestion(); };
+    scr.scrollTop=scr.scrollHeight;
+  }
+  function renderMcqComplete(){
+    const scr=$('#scr-lesson');
+    const total=mcq.queue.length, ok=mcq.correct;
+    addXP(10); // セット完了+10
+    Sound.fanfare();
+    scr.innerHTML='<div class="complete">'+catSVG('celebrate')+
+      '<div class="cat-say">'+catLine('complete')+'</div>'+
+      '<h2>択一セット完了！</h2>'+
+      '<div class="xp-pill">✨ +10 XP</div>'+
+      '<div class="stat-grid">'+
+        '<div class="c"><div class="v">'+ok+'/'+total+'</div><div class="l">正解</div></div>'+
+        '<div class="c"><div class="v">'+Math.round(100*ok/total)+'%</div><div class="l">正答率</div></div>'+
+      '</div>'+
+      '<div style="margin-top:8px"><button class="btn" id="mcqAgain">もう1セット</button>'+
+      '<button class="btn gray" style="margin-top:10px" onclick="App.UI.render(\'lesson\')">レッスンへ</button></div></div>';
+    celebrateBurst();
+    $('#mcqAgain').onclick=()=>startMcq(mode());
   }
   function startOption(opt){
     const m=mode(), t=todayISO(), s=Store.srs();
     let pool=[];
     if(opt==='weak'){
-      const units=unitsForMode(m).slice().sort((a,b)=>SRS.unitCrown(a.id)-SRS.unitCrown(b.id));
-      for(const u of units){ pool=pool.concat(Data.ofUnitType(u.id,'choice').map(i=>i.id)); if(pool.length>=10) break; }
+      // 弱点：Pickerの重み付け（弱点unit×試験重要度）＋kindフィルタ＋recent。
+      pool=Picker.build(m, { count:10 }).queue;
     }else if(opt==='wrong'){
-      pool=Data.choicesForMode(m).filter(i=>{ const r=s[i.id]; return r && r.wrong>0; }).map(i=>i.id);
-      pool=shuffle(pool);
+      // 「間違えた肢だけ」＝意図的再出題。kindフィルタもrecordも掛けない（保護）。
+      pool=shuffle(Data.choicesForMode(m).filter(i=>{ const r=s[i.id]; return r && r.wrong>0; }).map(i=>i.id));
     }else if(opt==='due'){
+      // 期限復習＝意図的再出題。kindフィルタ非適用。
       pool=SRS.dueItems(m,t);
     }else{
-      pool=shuffle(Data.choicesForMode(m).map(i=>i.id));
+      // ランダム10肢：kindフィルタ適用・重み無し（未出題優先せずseen可）
+      pool=Picker.build(m, { count:10, includeDue:false, weighted:false, seenOk:true }).queue;
     }
     if(!pool.length){ toast('対象の肢がありません'); return; }
     startLesson(pool.slice(0,10), {label:{weak:'弱点',wrong:'復習(誤答)',due:'期限復習',random:'ランダム'}[opt]});
@@ -950,6 +1217,7 @@ const UI=(function(){
   function startLesson(ids, meta){
     Sound.resume();
     lesson={ queue:ids.slice(), idx:0, correct:0, answers:[], meta:meta||{}, isDiag:false };
+    Picker.record(ids, todayISO()); // 実出題のみrecentに記録（連続レッスンの重複防止）
     go('lesson');
     renderQuestion();
   }
@@ -967,7 +1235,7 @@ const UI=(function(){
         '<div class="progbar"><i style="width:'+pct+'%"></i></div>'+
         '<div class="muted">'+(lesson.idx+1)+'/'+total+'</div></div>'+
       '<div class="muted" style="margin-bottom:6px">'+(lesson.isDiag?'診断テスト':'この肢は正しい？')+'</div>'+
-      '<div class="stem"><span class="tag">'+(UNIT_BY_ID[it.unit]?UNIT_BY_ID[it.unit].label:it.unit)+'</span><br>'+esc(it.stem)+'</div>'+
+      '<div class="stem"><div class="tag-row"><span class="tag">'+(UNIT_BY_ID[it.unit]?UNIT_BY_ID[it.unit].label:it.unit)+'</span>'+sourceBadge(it)+'</div>'+esc(it.stem)+'</div>'+
       '<div class="ox-row">'+
         '<button class="btn ox-o" data-ans="1">○ 正しい</button>'+
         '<button class="btn ox-x" data-ans="0">✕ 誤り</button>'+
@@ -996,7 +1264,9 @@ const UI=(function(){
     fb.className='feedback '+(correct?'ok':'ng');
     fb.innerHTML=
       '<div class="head">'+(correct?'✅ 正解！':'❌ 不正解')+'</div>'+
+      pointLine(it)+
       '<div class="exp">'+(it.explanation?esc(it.explanation):(correct?'その通り。':'解説準備中。'))+'</div>'+
+      revNote(it)+
       '<button class="btn'+(correct?'':' red')+'" id="fbNext">つづける</button>';
     document.body.appendChild(fb);
     $('#fbNext').onclick=()=>{ fb.remove(); lesson.idx++; renderQuestion(); };
@@ -1122,6 +1392,7 @@ const UI=(function(){
       if(cs.mode==='kijutsu'){
         body=
           '<div class="flip"><div class="side-lbl">記述問題 '+(cs.idx+1)+'/'+list.length+'</div>'+
+          (sourceBadge(it)?'<div class="tag-row" style="justify-content:center">'+sourceBadge(it)+'</div>':'')+
           esc(it.stem)+
           (it.keywords?'<div class="kw-row">'+it.keywords.map(k=>'<span class="kw">'+esc(k)+'</span>').join('')+'</div>':'')+
           (cs.revealed?'<div style="margin-top:14px;padding-top:12px;border-top:2px solid var(--line-2);font-size:16px;color:var(--mint-d)"><b>模範解答</b><br>'+esc(it.model||'')+'</div>'
@@ -1137,6 +1408,7 @@ const UI=(function(){
       }else{ // flash
         body=
           '<div class="flip"><div class="side-lbl">暗記カード '+(cs.idx+1)+'/'+list.length+(cs.revealed?'（裏）':'（表）')+'</div>'+
+          (sourceBadge(it)?'<div class="tag-row" style="justify-content:center">'+sourceBadge(it)+'</div>':'')+
           esc(cs.revealed?(it.back||''):it.stem)+'</div>';
         if(!cs.revealed){
           body+='<button class="btn blue" id="reveal">タップで裏面</button>';
@@ -1200,10 +1472,17 @@ const UI=(function(){
     unitsForMode(m).forEach(u=>{ dist[SRS.unitCrown(u.id)]++; });
     let cd='';
     for(let i=0;i<=5;i++) cd+='<div class="cc"><div class="n">'+dist[i]+'</div><div class="l">👑'+i+'</div></div>';
+    // kind別の内訳（過去問ベース/オリジナル）。メタ欠落(kind未定義)は「未分類」に計上。
+    const pool=Data.forMode(m).concat(Data.mcqForMode(m));
+    let nKako=0,nOrig=0,nNone=0;
+    pool.forEach(it=>{ if(it.kind==='kakomon')nKako++; else if(it.kind==='original')nOrig++; else nNone++; });
+    const kindLine='<div class="muted">過去問ベース <b>'+nKako+'</b>問 ／ オリジナル <b>'+nOrig+'</b>問'
+      +(nNone?' <span style="opacity:.7">（未分類 '+nNone+'）</span>':'')+'</div>';
     // XP推移（今週vs先週）SVG自作
     const xpSvg=weekXpSvg(p);
     $('#scr-progress').innerHTML=
       '<h2 class="title">進捗（'+EXAM[m].label+'）</h2>'+
+      '<div class="card"><h3>問題の内訳</h3>'+kindLine+'</div>'+
       '<div class="card"><h3>科目別 正答率</h3>'+acc+'</div>'+
       '<div class="card"><h3>王冠分布（単元数）</h3><div class="crown-dist">'+cd+'</div></div>'+
       '<div class="card"><h3>XP推移（今週 vs 先週）</h3>'+xpSvg+
@@ -1274,6 +1553,30 @@ const UI=(function(){
   function esc(s){ return String(s==null?'':s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
   function shuffle(a){ a=a.slice(); for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } return a; }
 
+  /* --- 出典バッジ（r2 §6.1 表示規約）。kind未定義→バッジ非表示（フォールバック） --- */
+  function sourceBadge(it){
+    if(!it || !it.kind) return '';          // メタ欠落時はバッジを出さない（エラーにしない）
+    if(it.kind==='kakomon'){
+      const yr = it.year ? '｜'+esc(it.year)+'相当' : '';
+      const rev = (it.rev==='revised') ? '<span class="rev">法改正対応</span>' : '';
+      return '<span class="src-badge kakomon">過去問ベース'+yr+rev+'</span>';
+    }
+    if(it.kind==='original'){
+      return '<span class="src-badge original">オリジナル</span>';
+    }
+    return ''; // 未知kindも安全に非表示
+  }
+  // 論点行。point未定義→非表示（フォールバック）
+  function pointLine(it){
+    if(!it || !it.point) return '';
+    return '<div class="point-line">論点: '+esc(it.point)+'</div>';
+  }
+  // 法改正注記（rev付きのみ）
+  function revNote(it){
+    if(!it || it.rev!=='revised') return '';
+    return '<div class="rev-note">⚠️ 法改正で内容が変わった論点</div>';
+  }
+
   function setMode(m){
     const p=Store.profile();
     if(p.mode===m) return;
@@ -1292,7 +1595,7 @@ const UI=(function(){
     offerDiag();
   }
 
-  return { init, go, render, addXP, toast, setMode };
+  return { init, go, render, addXP, toast, setMode, startMcq };
 })();
 
 /* ===========================================================================
@@ -1306,7 +1609,7 @@ async function boot(){
   UI.init();
 }
 
-return { Data, Store, SRS, UI, Sim, boot, _units:UNITS, _catSVG:catSVG };
+return { Data, Store, SRS, Picker, UI, Sim, boot, _units:UNITS, _catSVG:catSVG };
 })();
 
 document.addEventListener('DOMContentLoaded', ()=>{ App.boot(); });

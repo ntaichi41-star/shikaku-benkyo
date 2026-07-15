@@ -5,7 +5,7 @@
    ============================================================================ */
 "use strict";
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = "shikaku-cache-" + CACHE_VERSION;
 
 // SW自身の場所（scope）を起点に相対解決するので、サブパス配信でも壊れない
@@ -16,6 +16,7 @@ const PRECACHE_URLS = [
   "./data/minpo.json",
   "./data/gyosei.json",
   "./data/takken.json",
+  "./data/mcq.json",
   "./icons/icon-192.png",
   "./icons/icon-512.png",
   "./apple-touch-icon.png"
